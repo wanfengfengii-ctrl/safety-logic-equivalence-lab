@@ -1,0 +1,265 @@
+:root {
+  color-scheme: light;
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  line-height: 1.5;
+  color: #0f172a;
+  background: #f1f5f9;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.app {
+  max-width: 1500px;
+  margin: 0 auto;
+  padding: 20px 24px 60px;
+}
+
+.app-header h1 {
+  margin: 0 0 6px;
+  font-size: 24px;
+}
+
+.subtitle {
+  margin: 0 0 16px;
+  color: #475569;
+  font-size: 13px;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.btn {
+  border: 1px solid #94a3b8;
+  background: #fff;
+  border-radius: 6px;
+  padding: 7px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.btn:hover {
+  background: #f8fafc;
+}
+.btn-run {
+  background: #0f766e;
+  border-color: #0f766e;
+  color: #fff;
+  font-weight: 700;
+}
+.btn-run:hover {
+  background: #115e59;
+}
+.btn-clear {
+  margin-left: auto;
+}
+
+.editors {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.editor-pane h2 {
+  font-size: 15px;
+  margin: 0 0 6px;
+}
+
+.json-input {
+  width: 100%;
+  height: 260px;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  font-size: 12.5px;
+  border: 1px solid #94a3b8;
+  border-radius: 8px;
+  padding: 10px;
+  resize: vertical;
+  background: #fff;
+}
+.json-input:focus {
+  outline: 2px solid #0ea5e9;
+  outline-offset: -1px;
+}
+
+.live-status {
+  margin-top: 4px;
+  font-size: 12px;
+}
+.live-ok { color: #15803d; }
+.live-bad { color: #b91c1c; font-weight: 700; }
+.live-empty { color: #94a3b8; }
+
+.error-panel {
+  margin-top: 18px;
+  background: #fef2f2;
+  border: 1px solid #fca5a5;
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+.error-panel h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  color: #991b1b;
+}
+.error-panel ol {
+  margin: 0;
+  padding-left: 20px;
+}
+.error-item {
+  font-size: 13px;
+  margin: 3px 0;
+}
+.error-tag {
+  display: inline-block;
+  min-width: 92px;
+  font-family: monospace;
+  font-weight: 700;
+  color: #7c2d12;
+}
+.error-graph {
+  display: inline-block;
+  min-width: 70px;
+  color: #475569;
+}
+
+.placeholder {
+  margin-top: 24px;
+  padding: 30px;
+  text-align: center;
+  color: #64748b;
+  border: 2px dashed #cbd5e1;
+  border-radius: 10px;
+}
+
+.result {
+  margin-top: 20px;
+}
+
+.verdict {
+  font-size: 20px;
+  font-weight: 800;
+  padding: 14px 18px;
+  border-radius: 8px;
+  margin-bottom: 12px;
+}
+.verdict-equivalent {
+  background: #dcfce7;
+  border: 1px solid #86efac;
+  color: #166534;
+}
+.verdict-counterexample {
+  background: #fee2e2;
+  border: 1px solid #fca5a5;
+  color: #991b1b;
+}
+
+.meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  font-size: 12.5px;
+  color: #475569;
+  margin-bottom: 14px;
+}
+
+.counterexample {
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+.counterexample h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+.counterexample table {
+  border-collapse: collapse;
+}
+.counterexample th,
+.counterexample td {
+  border: 1px solid #d97706;
+  width: 44px;
+  text-align: center;
+  padding: 4px 0;
+  font-family: monospace;
+  font-size: 14px;
+}
+.col-nonshared {
+  opacity: 0.55;
+}
+.bit-one {
+  background: #fecaca;
+  font-weight: 800;
+  color: #991b1b;
+}
+.bit-zero {
+  background: #e2e8f0;
+  color: #334155;
+}
+.ce-outputs {
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+
+.graphs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.graph-column {
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 12px;
+  overflow-x: auto;
+}
+.graph-column h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+.svg-wrap {
+  overflow-x: auto;
+  background: #f8fafc;
+  border-radius: 6px;
+  padding: 8px;
+}
+.gate-svg {
+  width: 100%;
+  height: auto;
+  min-width: 360px;
+}
+
+.trace-block {
+  margin-top: 12px;
+}
+.trace-block h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+.trace-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.trace-table th,
+.trace-table td {
+  border: 1px solid #e2e8f0;
+  padding: 3px 6px;
+  text-align: left;
+}
+.trace-table th {
+  background: #f1f5f9;
+}
+.final-output {
+  margin: 8px 0 0;
+  font-size: 13px;
+}
