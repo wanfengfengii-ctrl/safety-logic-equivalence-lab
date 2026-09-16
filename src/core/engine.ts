@@ -44,7 +44,7 @@ export function collectVariableOrder(a: GateGraph, b: GateGraph): string[] {
 
 /**
  * 将一份门图符号编译为 ROBDD。
- * 按 DAG 的记忆化递归求值（环已在校验阶段拒绝）：
+ * 按 DAG 的记忆化迭代后序求值（环已在校验阶段拒绝），避免深门链栈溢出：
  * INPUT -> 文字节点；CONST -> 终端；NOT -> 否定；AND/OR/XOR -> Apply。
  */
 export function compileGraph(
@@ -54,39 +54,60 @@ export function compileGraph(
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const roots = new Map<string, number>();
 
-  const build = (id: string): number => {
-    const hit = roots.get(id);
-    if (hit !== undefined) return hit;
-
+  const dependencies = (id: string): string[] => {
     const node = byId.get(id)!;
-    let root: number;
-    switch (node.kind) {
-      case 'INPUT':
-        root = mgr.literal(node.name!);
-        break;
-      case 'CONST0':
-        root = mgr.zero;
-        break;
-      case 'CONST1':
-        root = mgr.one;
-        break;
-      case 'NOT':
-        root = mgr.negate(build(node.inputs![0]));
-        break;
-      default: {
-        const op = node.kind as BinOp;
-        root = mgr.apply(op, build(node.inputs![0]), build(node.inputs![1]));
-      }
+    if (node.kind === 'NOT') return [node.inputs![0]];
+    if (node.kind === 'AND' || node.kind === 'OR' || node.kind === 'XOR') {
+      return [node.inputs![0], node.inputs![1]];
     }
-    roots.set(id, root);
-    return root;
+    return [];
   };
 
-  for (const n of graph.nodes) build(n.id);
+  for (const start of graph.nodes) {
+    if (roots.has(start.id)) continue;
+    // 帧 = [节点 id, 下一个待处理依赖下标]
+    const stack: Array<[string, number]> = [[start.id, 0]];
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1];
+      const [id, nextDep] = frame;
+      const deps = dependencies(id);
+      if (nextDep < deps.length) {
+        frame[1] = nextDep + 1;
+        const child = deps[nextDep];
+        if (!roots.has(child)) stack.push([child, 0]);
+        continue;
+      }
+
+      const node = byId.get(id)!;
+      let root: number;
+      switch (node.kind) {
+        case 'INPUT':
+          root = mgr.literal(node.name!);
+          break;
+        case 'CONST0':
+          root = mgr.zero;
+          break;
+        case 'CONST1':
+          root = mgr.one;
+          break;
+        case 'NOT':
+          root = mgr.negate(roots.get(node.inputs![0])!);
+          break;
+        default:
+          root = mgr.apply(
+            node.kind as BinOp,
+            roots.get(node.inputs![0])!,
+            roots.get(node.inputs![1])!,
+          );
+      }
+      roots.set(id, root);
+      stack.pop();
+    }
+  }
   return roots;
 }
 
-/** 给定具体赋值，按门逐节点复算整张图的电平 */
+/** 给定具体赋值，按门逐节点复算整张图的电平（迭代后序，支持深门链） */
 export function evaluateGraph(
   graph: GateGraph,
   assignment: Readonly<Record<string, 0 | 1>>,
@@ -94,39 +115,58 @@ export function evaluateGraph(
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const values = new Map<string, 0 | 1>();
 
-  const evalNode = (id: string): 0 | 1 => {
-    const hit = values.get(id);
-    if (hit !== undefined) return hit;
+  const dependencies = (id: string): string[] => {
     const node = byId.get(id)!;
-    let v: 0 | 1;
-    switch (node.kind) {
-      case 'INPUT':
-        v = assignment[node.name!] ?? 0;
-        break;
-      case 'CONST0':
-        v = 0;
-        break;
-      case 'CONST1':
-        v = 1;
-        break;
-      case 'NOT':
-        v = evalNode(node.inputs![0]) === 1 ? 0 : 1;
-        break;
-      case 'AND':
-        v = evalNode(node.inputs![0]) === 1 && evalNode(node.inputs![1]) === 1 ? 1 : 0;
-        break;
-      case 'OR':
-        v = evalNode(node.inputs![0]) === 1 || evalNode(node.inputs![1]) === 1 ? 1 : 0;
-        break;
-      case 'XOR':
-        v = evalNode(node.inputs![0]) !== evalNode(node.inputs![1]) ? 1 : 0;
-        break;
+    if (node.kind === 'NOT') return [node.inputs![0]];
+    if (node.kind === 'AND' || node.kind === 'OR' || node.kind === 'XOR') {
+      return [node.inputs![0], node.inputs![1]];
     }
-    values.set(id, v);
-    return v;
+    return [];
   };
 
-  for (const n of graph.nodes) evalNode(n.id);
+  for (const start of graph.nodes) {
+    if (values.has(start.id)) continue;
+    const stack: Array<[string, number]> = [[start.id, 0]];
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1];
+      const [id, nextDep] = frame;
+      const deps = dependencies(id);
+      if (nextDep < deps.length) {
+        frame[1] = nextDep + 1;
+        const child = deps[nextDep];
+        if (!values.has(child)) stack.push([child, 0]);
+        continue;
+      }
+
+      const node = byId.get(id)!;
+      let v: 0 | 1;
+      switch (node.kind) {
+        case 'INPUT':
+          v = assignment[node.name!] ?? 0;
+          break;
+        case 'CONST0':
+          v = 0;
+          break;
+        case 'CONST1':
+          v = 1;
+          break;
+        case 'NOT':
+          v = values.get(node.inputs![0])! === 1 ? 0 : 1;
+          break;
+        case 'AND':
+          v = values.get(node.inputs![0])! === 1 && values.get(node.inputs![1])! === 1 ? 1 : 0;
+          break;
+        case 'OR':
+          v = values.get(node.inputs![0])! === 1 || values.get(node.inputs![1])! === 1 ? 1 : 0;
+          break;
+        case 'XOR':
+          v = values.get(node.inputs![0])! !== values.get(node.inputs![1])! ? 1 : 0;
+          break;
+      }
+      values.set(id, v);
+      stack.pop();
+    }
+  }
   return values;
 }
 
@@ -170,10 +210,14 @@ export function checkEquivalence(
   const shared = new Set(
     oldGraph.nodes.filter((n) => n.kind === 'INPUT').map((n) => n.name!),
   );
-  const sharedVariables = newGraph.nodes
-    .filter((n) => n.kind === 'INPUT' && shared.has(n.name!))
-    .map((n) => n.name!)
-    .sort();
+  // 新版图内可能存在同名 INPUT 节点（本工具不禁止），变量须按名去重后列一次
+  const sharedVariables = [
+    ...new Set(
+      newGraph.nodes
+        .filter((n) => n.kind === 'INPUT' && shared.has(n.name!))
+        .map((n) => n.name!),
+    ),
+  ].sort();
 
   if (miter === mgr.zero) {
     // 等价时以全 0 赋值逐门复算（输出必然相同）

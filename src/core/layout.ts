@@ -47,21 +47,35 @@ export function layoutGraph(graph: GateGraph): GraphLayout {
   const byId = new Map(graph.nodes.map((n, i) => [n.id, { node: n, order: i }]));
   const layerOf = new Map<string, number>();
 
-  const computeLayer = (id: string): number => {
-    const cached = layerOf.get(id);
-    if (cached !== undefined) return cached;
-    const { node } = byId.get(id)!;
-    let layer: number;
-    if (node.kind === 'INPUT' || node.kind === 'CONST0' || node.kind === 'CONST1') {
-      layer = 0;
-    } else {
+  const isLeaf = (kind: GateNode['kind']) =>
+    kind === 'INPUT' || kind === 'CONST0' || kind === 'CONST1';
+
+  // 记忆化迭代后序求层，深门链不栈溢出
+  for (const n of graph.nodes) {
+    if (layerOf.has(n.id)) continue;
+    // 帧 [节点 id, 下一个待处理入边下标]
+    const stack: Array<[string, number]> = [[n.id, 0]];
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1];
+      const [id, nextInput] = frame;
+      const node = byId.get(id)!.node;
       const inputs = node.inputs ?? [];
-      layer = inputs.length === 0 ? 1 : Math.max(...inputs.map(computeLayer)) + 1;
+      if (nextInput < inputs.length) {
+        frame[1] = nextInput + 1;
+        const child = inputs[nextInput];
+        if (!layerOf.has(child)) stack.push([child, 0]);
+        continue;
+      }
+      let layer: number;
+      if (isLeaf(node.kind)) {
+        layer = 0;
+      } else {
+        layer = inputs.length === 0 ? 1 : Math.max(...inputs.map((r) => layerOf.get(r) ?? 0)) + 1;
+      }
+      layerOf.set(id, layer);
+      stack.pop();
     }
-    layerOf.set(id, layer);
-    return layer;
-  };
-  for (const n of graph.nodes) computeLayer(n.id);
+  }
 
   const maxLayer = Math.max(0, ...graph.nodes.map((n) => layerOf.get(n.id)!));
 

@@ -251,3 +251,63 @@ describe('编译与求值', () => {
     expect(mgr.evaluate(roots.get('g')!, { A: 1, B: 0 })).toBe(0);
   });
 });
+
+describe('大规模门图（深链/宽输入不栈溢出、不超节点限）', () => {
+  it('两份完全相同的 500 输入异或链：判定 equivalent 且不触发节点上限', () => {
+    const nInputs = 500;
+    const nodes: Record<string, unknown>[] = [];
+    for (let i = 0; i < nInputs; i += 1) {
+      nodes.push({ id: `x${i}`, kind: 'INPUT', name: `X${i.toString().padStart(3, '0')}` });
+    }
+    nodes.push({ id: 'p1', kind: 'XOR', inputs: ['x0', 'x1'] });
+    for (let i = 2; i < nInputs; i += 1) {
+      nodes.push({ id: `p${i}`, kind: 'XOR', inputs: [`p${i - 1}`, `x${i}`] });
+    }
+    const json = JSON.stringify({ nodes, output: `p${nInputs - 1}` });
+    const [a, b] = parsePair(json, json);
+    const r = checkEquivalence(a, b);
+    expect(r.verdict).toBe('equivalent');
+    expect(r.miterRoot).toBe(0);
+    expect(r.sharedVariables.length).toBe(500);
+  });
+
+  it('8000 级串联非门：校验/编译/求值/布局均不栈溢出，两份相同判 equivalent', () => {
+    const depth = 8000;
+    const nodes: Record<string, unknown>[] = [
+      { id: 'x0', kind: 'INPUT', name: 'A' },
+    ];
+    for (let i = 1; i <= depth; i += 1) {
+      nodes.push({ id: `n${i}`, kind: 'NOT', inputs: [i === 1 ? 'x0' : `n${i - 1}`] });
+    }
+    const json = JSON.stringify({ nodes, output: `n${depth}` });
+    const [a, b] = parsePair(json, json);
+    const r = checkEquivalence(a, b);
+    expect(r.verdict).toBe('equivalent');
+    expect(r.oldTrace.length).toBe(depth + 1);
+  });
+});
+
+describe('同名 INPUT 去重', () => {
+  it('新版图含两个同名 A 输入节点时，共享变量栏只列一次 A', () => {
+    const oldG = JSON.stringify({
+      nodes: [
+        { id: 'a1', kind: 'INPUT', name: 'A' },
+        { id: 'g', kind: 'NOT', inputs: ['a1'] },
+      ],
+      output: 'g',
+    });
+    const newG = JSON.stringify({
+      nodes: [
+        { id: 'a1', kind: 'INPUT', name: 'A' },
+        { id: 'a2', kind: 'INPUT', name: 'A' },
+        { id: 'g1', kind: 'NOT', inputs: ['a1'] },
+        { id: 'g2', kind: 'NOT', inputs: ['a2'] },
+        { id: 'o', kind: 'AND', inputs: ['g1', 'g2'] },
+      ],
+      output: 'o',
+    });
+    const [a, b] = parsePair(oldG, newG);
+    const r = checkEquivalence(a, b);
+    expect(r.sharedVariables).toEqual(['A']);
+  });
+});

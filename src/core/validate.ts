@@ -44,13 +44,15 @@ interface ValidationResult {
   graphs: [GateGraph, GateGraph] | null;
 }
 
+type DetailedError = GraphError & { slot: number };
+
 function err(
   graph: 0 | 1,
   position: number,
   code: GraphError['code'],
   message: string,
   slot = -1,
-): GraphError & { slot: number } {
+): DetailedError {
   return {
     graph,
     graphLabel: graph === 0 ? '旧图(A)' : '新图(B)',
@@ -68,8 +70,8 @@ function err(
 function validateOne(
   rawText: string,
   graphIndex: 0 | 1,
-): { errors: (GraphError & { slot: number })[]; graph: GateGraph | null } {
-  const errors: (GraphError & { slot: number })[] = [];
+): { errors: DetailedError[]; graph: GateGraph | null } {
+  const errors: DetailedError[] = [];
   const label = graphIndex === 0 ? '旧图(A)' : '新图(B)';
 
   let parsed: RawGraph;
@@ -122,8 +124,16 @@ function validateOne(
     );
   }
 
+  // 预扫一遍收集全部 id 字符串（含重复 id），避免在每节点处重复扫描（万级节点时防 O(n^2)）
+  const allIdStrings = new Set<string>();
+  for (const rn of rawNodes) {
+    const rid = (rn as Record<string, unknown> | null)?.id;
+    if (typeof rid === 'string' && rid.length > 0) allIdStrings.add(rid);
+  }
+
   const nodes: GateNode[] = [];
   const idFirstPosition = new Map<string, number>();
+  // knownIds 仅保留首次出现的 id（重复 id 的后续副本不建图、不参与环检测）
   const knownIds = new Set<string>();
 
   rawNodes.forEach((item, position) => {
@@ -167,7 +177,7 @@ function validateOne(
         ),
       );
       // 类型未知，后续元数检查无意义
-      nodes.push({ id, kind: 'INPUT' });
+      if (knownIds.has(id)) nodes.push({ id, kind: 'INPUT' });
       return;
     }
     const kind = n.kind as NodeKind;
@@ -236,12 +246,6 @@ function validateOne(
       );
     }
 
-    const allIdStrings = new Set<string>();
-    rawNodes.forEach((rn) => {
-      const rid = (rn as Record<string, unknown> | null)?.id;
-      if (typeof rid === 'string') allIdStrings.add(rid);
-    });
-
     inputs.forEach((ref, slot) => {
       // 前向引用允许（门图不要求拓扑序）
       if (!allIdStrings.has(ref)) {
@@ -257,15 +261,17 @@ function validateOne(
       }
     });
 
-    const node: GateNode = { id, kind };
-    if (kind === 'INPUT') node.name = n.name as string | undefined;
-    if (n.inputs !== undefined) node.inputs = inputs;
-    nodes.push(node);
+    if (knownIds.has(id)) {
+      const node: GateNode = { id, kind };
+      if (kind === 'INPUT') node.name = n.name as string | undefined;
+      if (n.inputs !== undefined) node.inputs = inputs;
+      nodes.push(node);
+    }
   });
 
   // 输出检查
   if (typeof parsed.output === 'string' && parsed.output.length > 0) {
-    if (!knownIds.has(parsed.output)) {
+    if (!allIdStrings.has(parsed.output)) {
       errors.push(
         err(
           graphIndex,
@@ -277,60 +283,7 @@ function validateOne(
     }
   }
 
-  // 环检查（Tarjan SCC；自环也算环）。仅沿已知 id 的入边建图。
-  const adjacency = new Map<string, string[]>();
-  for (const node of nodes) {
-    if (!knownIds.has(node.id)) continue;
-    const refs = (node.inputs ?? []).filter((r) => knownIds.has(r));
-    adjacency.set(node.id, refs);
-  }
-
-  let nextIndex = 0;
-  const indices = new Map<string, number>();
-  const lowlink = new Map<string, number>();
-  const onStack = new Set<string>();
-  const stack: string[] = [];
-  const cycleMembers = new Set<string>();
-
-  const strongConnect = (v: string) => {
-    indices.set(v, nextIndex);
-    lowlink.set(v, nextIndex);
-    nextIndex += 1;
-    stack.push(v);
-    onStack.add(v);
-
-    for (const w of adjacency.get(v) ?? []) {
-      if (!indices.has(w)) {
-        strongConnect(w);
-        lowlink.set(v, Math.min(lowlink.get(v)!, lowlink.get(w)!));
-      } else if (onStack.has(w)) {
-        lowlink.set(v, Math.min(lowlink.get(v)!, indices.get(w)!));
-      }
-    }
-
-    if (lowlink.get(v) === indices.get(v)) {
-      const component: string[] = [];
-      let w: string;
-      do {
-        w = stack.pop()!;
-        onStack.delete(w);
-        component.push(w);
-      } while (w !== v);
-      const hasSelfLoop = component.some((c) =>
-        (adjacency.get(c) ?? []).includes(c),
-      );
-      if (component.length > 1 || hasSelfLoop) {
-        component.forEach((c) => cycleMembers.add(c));
-      }
-    }
-  };
-
-  // 按节点位置升序启动 DFS，保证错误信息稳定
-  for (const node of nodes) {
-    if (knownIds.has(node.id) && !indices.has(node.id)) {
-      strongConnect(node.id);
-    }
-  }
+  const cycleMembers = detectCycleMembers(nodes, knownIds);
 
   const positionById = new Map<string, number>();
   rawNodes.forEach((rn, i) => {
@@ -358,6 +311,84 @@ function validateOne(
 }
 
 /**
+ * 环检测：迭代式 Kosaraju（两趟显式栈 DFS），万级串联门链不会栈溢出。
+ * 边 id -> 其入边引用（信号流向为 引用方 -> 被引用方）。
+ * 返回处于非平凡强连通分量（多节点 SCC 或自环）中的节点集合。
+ */
+function detectCycleMembers(
+  nodes: GateNode[],
+  knownIds: Set<string>,
+): Set<string> {
+  const adj = new Map<string, string[]>();
+  const radj = new Map<string, string[]>();
+  for (const id of knownIds) {
+    adj.set(id, []);
+    radj.set(id, []);
+  }
+  for (const node of nodes) {
+    if (!knownIds.has(node.id)) continue;
+    for (const r of node.inputs ?? []) {
+      if (knownIds.has(r)) {
+        adj.get(node.id)!.push(r);
+        radj.get(r)!.push(node.id);
+      }
+    }
+  }
+
+  // 第一趟：在原图上迭代 DFS，记录完成序
+  const visited = new Set<string>();
+  const finishOrder: string[] = [];
+  for (const start of knownIds) {
+    if (visited.has(start)) continue;
+    // 帧 [节点, 下一条邻接边下标]
+    const stack: Array<[string, number]> = [[start, 0]];
+    visited.add(start);
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1];
+      const [v, nextEdge] = frame;
+      const neighbors = adj.get(v) ?? [];
+      if (nextEdge < neighbors.length) {
+        frame[1] = nextEdge + 1;
+        const w = neighbors[nextEdge];
+        if (!visited.has(w)) {
+          visited.add(w);
+          stack.push([w, 0]);
+        }
+      } else {
+        finishOrder.push(v);
+        stack.pop();
+      }
+    }
+  }
+
+  // 第二趟：按完成序逆序在反图上 DFS，每次展开得到一个 SCC
+  const assigned = new Set<string>();
+  const cycleMembers = new Set<string>();
+  for (let i = finishOrder.length - 1; i >= 0; i -= 1) {
+    const start = finishOrder[i];
+    if (assigned.has(start)) continue;
+    const component: string[] = [];
+    const dfsStack = [start];
+    assigned.add(start);
+    while (dfsStack.length > 0) {
+      const v = dfsStack.pop()!;
+      component.push(v);
+      for (const w of radj.get(v) ?? []) {
+        if (!assigned.has(w)) {
+          assigned.add(w);
+          dfsStack.push(w);
+        }
+      }
+    }
+    const hasSelfLoop = component.some((c) => (adj.get(c) ?? []).includes(c));
+    if (component.length > 1 || hasSelfLoop) {
+      component.forEach((c) => cycleMembers.add(c));
+    }
+  }
+  return cycleMembers;
+}
+
+/**
  * 校验两份门图。旧图(graph 0)错误整体排在新图之前，
  * 同图内按输入位置（JSON 中节点下标）升序。
  */
@@ -380,7 +411,7 @@ export function validatePair(
   return { errors: [], graphs: [a.graph, b.graph] };
 }
 
-/** 收集两图共享的 INPUT 变量名（同名即同一变量），ASCII 升序 */
+/** 收集两图共享的 INPUT 变量名（同名即同一变量，按名去重，ASCII 升序） */
 export function sharedVariables(a: GateGraph, b: GateGraph): string[] {
   const namesA = new Set(
     a.nodes.filter((n) => n.kind === 'INPUT').map((n) => n.name!),

@@ -9,22 +9,25 @@
  * 变量序：调用方给定的全序（本工作台为两图全部 INPUT 名的 ASCII 升序，
  * 因而共享变量天然按 ASCII 升序出现）。
  *
- * 每个唯一化节点额外维护“最小满足赋值摘要” sat: Uint8Array：
- *   - 终端 1 的摘要为全 0（已被满足，无剩余决策）；
+ * 每个唯一化节点额外维护“最小满足赋值摘要”。为避免每节点保存长度为
+ * 变量数的数组（O(节点数 × 变量数) 内存），摘要以建点时即唯一确定的
+ * 父指针链增量存储（satParent）：
+ *   - 终端 1 为链终点（satParent = -1，已被满足，无剩余决策）；
  *   - 节点 v：低分支可满足（low !== 0，ROBDD 中非 0 节点必可满足）时取低分支，
- *     sat[v] = 0，其余复制 sat(low)；
- *   - 否则取高分支，sat[v] = 1，其余复制 sat(high)；
- *   - 摘要中跳过的变量一律补 0。
- * 该摘要只在建点（mk）时随约简一同计算与复用，Apply/否定返回的都是 mk 的产物，
- * 因此不变量在任何约简后仍然成立。异或根的摘要即可直接读出为反例，
- * 无需任何路径搜索或回溯。
+ *     satParent = low（本变量取值 0）；否则取高分支，satParent = high（取值 1）；
+ *   - 读取时从该节点沿 satParent 下降到 1 终端，途经变量写入其取值，
+ *     链上跳过的变量一律保持 0。
+ * 下降路径在 mk 建点时已唯一确定，读取只是把既定链式摘要展开，
+ * 不是路径搜索或回溯。摘要只在建点（mk）时随约简一同确定与复用，
+ * Apply/否定返回的都是 mk 的产物，因此不变量在任何约简后仍然成立。
+ * 异或根的摘要展开即可直接读出为反例。
  */
 
 export type BinOp = 'AND' | 'OR' | 'XOR';
 
 const TERMINAL_ZERO = 0;
 const TERMINAL_ONE = 1;
-export const MAX_BDD_NODES = 200_000;
+export const MAX_BDD_NODES = 2_000_000;
 
 export class BddLimitError extends Error {
   constructor(message: string) {
@@ -38,8 +41,8 @@ interface InternalNode {
   varIndex: number;
   low: number;
   high: number;
-  /** 到终端 1 的最小满足赋值摘要（长度 = 变量数） */
-  sat: Uint8Array;
+  /** 满足摘要链：本节点取何分支可到达 1 终端（建点时按低优先确定） */
+  satParent: number;
 }
 
 export class BddManager {
@@ -63,10 +66,9 @@ export class BddManager {
     const m = new Map<string, number>();
     order.forEach((name, i) => m.set(name, i));
     this.varIndex = m;
-    const zeroSat = new Uint8Array(order.length);
     this.nodes.push(
-      { varIndex: order.length, low: -1, high: -1, sat: zeroSat },
-      { varIndex: order.length, low: -1, high: -1, sat: zeroSat },
+      { varIndex: order.length, low: -1, high: -1, satParent: -1 },
+      { varIndex: order.length, low: -1, high: -1, satParent: -1 },
     );
   }
 
@@ -114,13 +116,11 @@ export class BddManager {
     }
 
     // 不变量：低分支可满足则走低分支（本变量取 0），否则走高分支（取 1）。
-    // ROBDD 中 low !== 0 当且仅当 low 子函数可满足。
-    const source = low !== TERMINAL_ZERO ? low : high;
-    const sat = new Uint8Array(this.nodes[source].sat);
-    sat[varIndex] = low !== TERMINAL_ZERO ? 0 : 1;
-
+    // ROBDD 中 low !== 0 当且仅当 low 子函数可满足。每节点仅 O(1) 摘要存储，
+    // 具体赋值由 satisfyingAssignment 沿此既定链展开（非搜索）。
+    const satParent = low !== TERMINAL_ZERO ? low : high;
     const id = this.nodes.length;
-    this.nodes.push({ varIndex, low, high, sat });
+    this.nodes.push({ varIndex, low, high, satParent });
     this.uniqueTable.set(key, id);
     return id;
   }
@@ -147,50 +147,129 @@ export class BddManager {
 
   /**
    * 布尔否定：终端互换；内部节点由 mk 重建（R1/R2 与 sat 自动维护）。
-   * 双向缓存保证对合性 ¬(¬f) === f（同一节点 id），这是奇偶等函数
-   * 完全共享（每变量层恰好两个节点）的必要条件。
+   * 双向缓存保证对合性 ¬(¬f) === f（同一节点 id）。
+   * 使用显式栈做记忆化后序展开，串联数万级非门链也不会栈溢出。
    */
   negate(id: number): number {
     if (id === TERMINAL_ZERO) return TERMINAL_ONE;
     if (id === TERMINAL_ONE) return TERMINAL_ZERO;
-    const cached = this.negCache.get(id);
-    if (cached !== undefined) return cached;
-    const n = this.nodes[id];
-    const result = this.mk(
-      n.varIndex,
-      this.negate(n.low),
-      this.negate(n.high),
-    );
-    this.negCache.set(id, result);
-    if (result > 1) this.negCache.set(result, id);
-    return result;
+    const cached0 = this.negCache.get(id);
+    if (cached0 !== undefined) return cached0;
+
+    interface NegFrame {
+      id: number;
+      lowR: number | undefined;
+      highR: number | undefined;
+    }
+    const stack: NegFrame[] = [{ id, lowR: undefined, highR: undefined }];
+
+    while (stack.length > 0) {
+      const f = stack[stack.length - 1];
+      const n = this.nodes[f.id];
+
+      if (f.lowR === undefined) {
+        const r = n.low <= 1 ? 1 - n.low : this.negCache.get(n.low);
+        if (r === undefined) {
+          stack.push({ id: n.low, lowR: undefined, highR: undefined });
+          continue;
+        }
+        f.lowR = r;
+      }
+      if (f.highR === undefined) {
+        const r = n.high <= 1 ? 1 - n.high : this.negCache.get(n.high);
+        if (r === undefined) {
+          stack.push({ id: n.high, lowR: undefined, highR: undefined });
+          continue;
+        }
+        f.highR = r;
+      }
+
+      const result = this.mk(n.varIndex, f.lowR, f.highR);
+      this.negCache.set(f.id, result);
+      if (result > 1) this.negCache.set(result, f.id);
+      stack.pop();
+      if (stack.length > 0) {
+        const parent = stack[stack.length - 1];
+        if (parent.lowR === undefined) parent.lowR = result;
+        else parent.highR = result;
+      }
+    }
+
+    return this.negCache.get(id)!;
   }
 
   /**
    * Apply：按 Shannon 展开递归合成 op(f, g)，计算表记忆化。
-   * 递归深度不超过变量数（每层严格推进到序中下一变量）。
+   * 每展开一层严格推进到序中下一变量（终止性保证）。
+   * 使用显式工作栈做后序求值，超长门链（数千~数万级）不会栈溢出。
    */
   apply(op: BinOp, f: number, g: number): number {
-    // 终端短路
-    const terminal = this.applyTerminal(op, f, g);
-    if (terminal !== null) return terminal;
+    const direct = this.applyTerminal(op, f, g);
+    if (direct !== null) return direct;
+    // 幂等短路：XOR(f,f)=0；AND/OR(f,f)=f。
+    // 两份完全相同门图的 miter 因此立即归约为 0，无需任何展开。
+    if (f === g) {
+      const idem = op === 'XOR' ? TERMINAL_ZERO : f;
+      this.computedTable.set(`${op}|${f}|${g}`, idem);
+      return idem;
+    }
+    const rootKey = `${op}|${f}|${g}`;
+    if (this.computedTable.has(rootKey)) return this.computedTable.get(rootKey)!;
 
-    const key = `${op}|${f}|${g}`;
-    const cached = this.computedTable.get(key);
-    if (cached !== undefined) return cached;
-    this.applyCalls += 1;
+    interface ApplyFrame {
+      f: number;
+      g: number;
+      v: number;
+      low: number | undefined;
+      high: number | undefined;
+    }
+    const makeFrame = (ff: number, gg: number): ApplyFrame => ({
+      f: ff,
+      g: gg,
+      v: Math.min(this.indexOf(ff), this.indexOf(gg)),
+      low: undefined,
+      high: undefined,
+    });
+    // 返回已确定结果（终端短路或计算表命中），否则 undefined 表示需入栈展开
+    const resolve = (ff: number, gg: number): number | undefined => {
+      const t = this.applyTerminal(op, ff, gg);
+      if (t !== null) return t;
+      return this.computedTable.get(`${op}|${ff}|${gg}`);
+    };
 
-    const v = Math.min(this.indexOf(f), this.indexOf(g));
-    const fLow = this.cofactor(f, v, 0);
-    const fHigh = this.cofactor(f, v, 1);
-    const gLow = this.cofactor(g, v, 0);
-    const gHigh = this.cofactor(g, v, 1);
+    const stack: ApplyFrame[] = [makeFrame(f, g)];
+    while (stack.length > 0) {
+      const fr = stack[stack.length - 1];
 
-    const low = this.apply(op, fLow, gLow);
-    const high = this.apply(op, fHigh, gHigh);
-    const result = this.mk(v, low, high);
-    this.computedTable.set(key, result);
-    return result;
+      if (fr.low === undefined) {
+        const r = resolve(this.cofactor(fr.f, fr.v, 0), this.cofactor(fr.g, fr.v, 0));
+        if (r === undefined) {
+          stack.push(makeFrame(this.cofactor(fr.f, fr.v, 0), this.cofactor(fr.g, fr.v, 0)));
+          continue;
+        }
+        fr.low = r;
+      }
+      if (fr.high === undefined) {
+        const r = resolve(this.cofactor(fr.f, fr.v, 1), this.cofactor(fr.g, fr.v, 1));
+        if (r === undefined) {
+          stack.push(makeFrame(this.cofactor(fr.f, fr.v, 1), this.cofactor(fr.g, fr.v, 1)));
+          continue;
+        }
+        fr.high = r;
+      }
+
+      const result = this.mk(fr.v, fr.low, fr.high);
+      this.computedTable.set(`${op}|${fr.f}|${fr.g}`, result);
+      this.applyCalls += 1;
+      stack.pop();
+      if (stack.length > 0) {
+        const parent = stack[stack.length - 1];
+        if (parent.low === undefined) parent.low = result;
+        else parent.high = result;
+      }
+    }
+
+    return this.computedTable.get(rootKey)!;
   }
 
   private applyTerminal(op: BinOp, f: number, g: number): number | null {
@@ -213,16 +292,22 @@ export class BddManager {
     }
   }
 
-  /** 直接读取节点摘要为“变量名 -> 0/1”，不做任何搜索 */
+  /**
+   * 沿建点时确定的 satParent 链直接展开为“变量名 -> 0/1”。
+   * 链在 mk 中唯一确定，此处不做任何搜索或回溯；未途经的变量保持 0。
+   */
   satisfyingAssignment(id: number): Record<string, 0 | 1> {
     if (id === TERMINAL_ZERO) {
       throw new Error('终端 0 不可满足，无满足赋值摘要');
     }
-    const sat = this.nodes[id].sat;
     const assignment: Record<string, 0 | 1> = {};
-    this.order.forEach((name, i) => {
-      assignment[name] = sat[i] === 1 ? 1 : 0;
-    });
+    for (const name of this.order) assignment[name] = 0;
+    let cur = id;
+    while (cur > TERMINAL_ONE) {
+      const n = this.nodes[cur];
+      assignment[this.order[n.varIndex]] = n.satParent === n.high ? 1 : 0;
+      cur = n.satParent;
+    }
     return assignment;
   }
 

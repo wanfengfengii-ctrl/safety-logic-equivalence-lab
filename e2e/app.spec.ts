@@ -109,3 +109,72 @@ test('纯前端：无任何业务后端/在线服务请求', async ({ page }) =>
   await expect(page.getByTestId('verdict')).toContainText('EQUIVALENT');
   expect(external).toEqual([]);
 });
+
+function chainGraphs(): [string, string] {
+  // 8000 级串联非门，两图完全相同
+  const depth = 8000;
+  const nodes: unknown[] = [{ id: 'x0', kind: 'INPUT', name: 'A' }];
+  for (let i = 1; i <= depth; i += 1) {
+    nodes.push({ id: `n${i}`, kind: 'NOT', inputs: [i === 1 ? 'x0' : `n${i - 1}`] });
+  }
+  const json = JSON.stringify({ nodes, output: `n${depth}` });
+  return [json, json];
+}
+
+function xorChainJson(): string {
+  const n = 500;
+  const nodes: unknown[] = [];
+  for (let i = 0; i < n; i += 1) {
+    nodes.push({ id: `x${i}`, kind: 'INPUT', name: `X${String(i).padStart(3, '0')}` });
+  }
+  nodes.push({ id: 'p1', kind: 'XOR', inputs: ['x0', 'x1'] });
+  for (let i = 2; i < n; i += 1) {
+    nodes.push({ id: `p${i}`, kind: 'XOR', inputs: [`p${i - 1}`, `x${i}`] });
+  }
+  return JSON.stringify({ nodes, output: `p${n - 1}` });
+}
+
+test('大规模：500 输入异或链两图相同判 equivalent（不触发节点上限）', async ({ page }) => {
+  const json = xorChainJson();
+  await page.getByTestId('editor-old').fill(json);
+  await page.getByTestId('editor-new').fill(json);
+  await page.getByTestId('run-check').click();
+  await expect(page.getByTestId('verdict')).toContainText('EQUIVALENT', { timeout: 30000 });
+  await expect(page.getByTestId('fatal-panel')).toHaveCount(0);
+});
+
+test('大规模：8000 非门链不栈溢出，判 equivalent', async ({ page }) => {
+  const [oldJ, newJ] = chainGraphs();
+  await page.getByTestId('editor-old').fill(oldJ);
+  await page.getByTestId('editor-new').fill(newJ);
+  await page.getByTestId('run-check').click();
+  await expect(page.getByTestId('verdict')).toContainText('EQUIVALENT', { timeout: 30000 });
+  await expect(page.getByTestId('fatal-panel')).toHaveCount(0);
+});
+
+test('同名 INPUT：共享变量栏只列一次 A', async ({ page }) => {
+  const oldG = JSON.stringify({
+    nodes: [
+      { id: 'a1', kind: 'INPUT', name: 'A' },
+      { id: 'g', kind: 'NOT', inputs: ['a1'] },
+    ],
+    output: 'g',
+  });
+  const newG = JSON.stringify({
+    nodes: [
+      { id: 'a1', kind: 'INPUT', name: 'A' },
+      { id: 'a2', kind: 'INPUT', name: 'A' },
+      { id: 'g1', kind: 'NOT', inputs: ['a1'] },
+      { id: 'g2', kind: 'NOT', inputs: ['a2'] },
+      { id: 'o', kind: 'AND', inputs: ['g1', 'g2'] },
+    ],
+    output: 'o',
+  });
+  await page.getByTestId('editor-old').fill(oldG);
+  await page.getByTestId('editor-new').fill(newG);
+  await page.getByTestId('run-check').click();
+  await expect(page.getByTestId('verdict')).toContainText('EQUIVALENT');
+  const meta = page.locator('.meta-row');
+  await expect(meta).toContainText('共享变量（ASCII 升序）：A');
+  await expect(meta).not.toContainText('A、A');
+});
